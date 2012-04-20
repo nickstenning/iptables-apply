@@ -3,16 +3,22 @@
 # iptables-apply -- a safer way to update iptables remotely
 #
 # Copyright © Martin F. Krafft <madduck@madduck.net>
-# Released under the terms of the Artistic Licence 2.
+# Released under the terms of the Artistic Licence 2.0
 #
-# Ported to OpenWRT by Mark Nunberg
+# Updated by Nick Stenning <nick@whiteink.com> to cope with
+# a wider range of failures, including destruction of existing
+# connections and termination of the shell executing this
+# script.
+#
 set -eu
 
-PROGNAME="${0##*/}";
-VERSION=1.0
+PROGNAME="${0##*/}"
+VERSION=2.0
 
 TIMEOUT=10
 DEFAULT_FILE=/etc/network/iptables
+
+PIDFILE=/var/run/iptables-apply.pid
 
 function blurb()
 {
@@ -24,7 +30,7 @@ function blurb()
 function copyright()
 {
 	cat <<-_eof
-	$PROGNAME is C Martin F. Krafft <madduck@madduck.net>.
+	$PROGNAME is (C) Martin F. Krafft <madduck@madduck.net>.
 
 	The program has been published under the terms of the Artistic Licence 2.0
 	_eof
@@ -49,44 +55,57 @@ function usage()
 	previous ruleset.
 
 	The following options may be specified, using standard conventions:
-	
+
 	-t | --timeout	Specify the timeout in seconds (default: $TIMEOUT)
 	-V | --version	Display version information
 	-h | --help	Display this help text
 	_eof
 }
 
+# If this script is called with __rollback__ as the first argument, instead of
+# accepting its usual arguments, it will sleep for $2 seconds, and then rollback
+# the iptables ruleset.
+if [[ "${#}" -eq 4 ]] && [[ "${1}" = "__rollback__ " ]]; then
+	sleep "${2}"
+	# $3 is the iptables-restore command, and $4 is the tempfile containing the
+	# saved iptables ruleset.
+	"${3}" <"${4}"
+	rm "${4}"
+	rm "${PIDFILE}"
+	exit
+fi
+
 SHORTOPTS="t:Vh";
 LONGOPTS="timeout:,version,help";
 
-#OPTS=$(getopt -s bash -o "$SHORTOPTS" -l "$LONGOPTS" -n "$PROGNAME" -- "$@") || exit $?
-#for opt in $OPTS; do
-#	case "$opt" in
-#		(-*) unset OPT_STATE;;
-#		(*)
-#			case "${OPT_STATE:-}" in
-#				(SET_TIMEOUT)
-#					eval TIMEOUT=$opt
-#					case "$TIMEOUT" in
-#						([0-9]*) :;;
-#						(*)
-#							echo "E: non-numeric timeout value." >&2
-#							exit 1
-#							;;
-#					esac
-#					;;
-#			esac
-#			;;
-#	esac
-#
-#	case "$opt" in
-#		(-h|--help) usage >&2; exit 0;;
-#		(-V|--version) about >&2; exit 0;;
-#		(-t|--timeout) OPT_STATE=SET_TIMEOUT;;
-#		(--) break;;
-#	esac
-#	shift
-#done
+OPTS=$(getopt -s bash -o "$SHORTOPTS" -l "$LONGOPTS" -n "$PROGNAME" -- "$@") || exit $?
+for opt in $OPTS; do
+	case "$opt" in
+		(-*) unset OPT_STATE;;
+		(*)
+			case "${OPT_STATE:-}" in
+				(SET_TIMEOUT)
+					eval TIMEOUT=$opt
+					case "$TIMEOUT" in
+						([0-9]*) :;;
+						(*)
+							echo "E: non-numeric timeout value." >&2
+							exit 1
+							;;
+					esac
+					;;
+			esac
+			;;
+	esac
+
+	case "$opt" in
+		(-h|--help) usage >&2; exit 0;;
+		(-V|--version) about >&2; exit 0;;
+		(-t|--timeout) OPT_STATE=SET_TIMEOUT;;
+		(--) break;;
+	esac
+	shift
+done
 
 FILE="${1:-$DEFAULT_FILE}";
 
@@ -111,7 +130,7 @@ case "${0##*/}" in
 		;;
 esac
 
-COMMANDS=(mktemp "$SAVE" "$RESTORE")
+COMMANDS=(tempfile start-stop-daemon "$SAVE" "$RESTORE")
 
 for cmd in "${COMMANDS[@]}"; do
 	if ! command -v $cmd >/dev/null; then
@@ -122,8 +141,7 @@ done
 
 umask 0700
 
-TMPFILE=$(mktemp)
-trap "rm -f $TMPFILE" EXIT 1 2 3 4 5 6 7 8 10 11 12 13 14 15
+TMPFILE=$(tempfile -p iptap)
 
 if ! "$SAVE" >"$TMPFILE"; then
 	if ! grep -q ipt /proc/modules 2>/dev/null; then
@@ -135,6 +153,22 @@ if ! "$SAVE" >"$TMPFILE"; then
 	fi
 fi
 
+if [ -r "${PIDFILE}" ]; then
+	echo "${PIDFILE} already exists. Exiting!"
+	exit 6
+fi
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PROG="${DIR}/$(basename $0)"
+
+set -x
+
+# fork a process which will reset the rules after the timeout
+start-stop-daemon --start --background \
+                  --pidfile "${PIDFILE}" --make-pidfile \
+                  --startas "$(which bash)" -- \
+                  "$PROG" __rollback__ "${TIMEOUT:-15}" "$RESTORE" "$TMPFILE"
+
 [ -x /etc/init.d/fail2ban ] && /etc/init.d/fail2ban stop
 
 echo -n "Applying new ruleset... "
@@ -143,27 +177,29 @@ if ! "$RESTORE" <"$FILE"; then
 	echo "E: unknown error applying new iptables ruleset." >&2
 	exit 5
 else
-	echo done.
+	echo "done."
 fi
 
-echo -n "Can you establish NEW connections to the machine? (y/N) "
+echo -n "Can you establish NEW connections to the machine? [yN] "
 
 read -n1 -t "${TIMEOUT:-15}" ret 2>&1 || :
 case "${ret:-}" in
 	(y*|Y*)
-		echo
-		echo ... then my job is done. See you next time.
+		start-stop-daemon --stop --pidfile "${PIDFILE}"
+		rm "${PIDFILE}"
+		echo "In which case, my job is done. See you next time."
 		;;
 	(*)
-		if [[ -z "${ret:-}" ]]; then
-			echo "apparently not..."
+		echo -n "Going to restore the old ruleset..."
+		if "$RESTORE" <"$TMPFILE"; then
+			# If we got this far, we can assume the ruleset was successfully restored,
+			# and we can kill the daemon
+			start-stop-daemon --stop --pidfile "${PIDFILE}"
+			rm "${PIDFILE}"
+			echo "Done."
 		else
-			echo
+			echo "Oh dear. That looks like it didn't work!"
 		fi
-		echo "Timeout. Something happened (or did not). Better play it safe..."
-		echo -n "Reverting to old ruleset... "
-		"$RESTORE" <"$TMPFILE";
-		echo done.
 		exit 255
 		;;
 esac
