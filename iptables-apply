@@ -166,8 +166,8 @@ set -x
 # fork a process which will reset the rules after the timeout
 start-stop-daemon --start --background \
                   --pidfile "${PIDFILE}" --make-pidfile \
-                  --startas "$(which bash)" -- \
-                  "$PROG" __rollback__ "${TIMEOUT:-15}" "$RESTORE" "$TMPFILE"
+                  --startas "$(which bash)" -- \ 
+                  "$PROG" __rollback__ "${TIMEOUT}" "$RESTORE" "$TMPFILE"
 
 [ -x /etc/init.d/fail2ban ] && /etc/init.d/fail2ban stop
 
@@ -182,7 +182,7 @@ fi
 
 echo -n "Can you establish NEW connections to the machine? [yN] "
 
-read -n1 -t "${TIMEOUT:-15}" ret 2>&1 || :
+read -n1 -t "${TIMEOUT}" ret 2>&1 || :
 case "${ret:-}" in
 	(y*|Y*)
 		start-stop-daemon --stop --pidfile "${PIDFILE}"
