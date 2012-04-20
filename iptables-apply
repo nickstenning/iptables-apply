@@ -65,7 +65,7 @@ function usage()
 # If this script is called with __rollback__ as the first argument, instead of
 # accepting its usual arguments, it will sleep for $2 seconds, and then rollback
 # the iptables ruleset.
-if [[ "${#}" -eq 4 ]] && [[ "${1}" = "__rollback__ " ]]; then
+if [[ "${#}" -eq 4 ]] && [[ "${1}" = "__rollback__" ]]; then
 	sleep "${2}"
 	# $3 is the iptables-restore command, and $4 is the tempfile containing the
 	# saved iptables ruleset.
@@ -161,13 +161,11 @@ fi
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PROG="${DIR}/$(basename $0)"
 
-set -x
-
 # fork a process which will reset the rules after the timeout
 start-stop-daemon --start --background \
                   --pidfile "${PIDFILE}" --make-pidfile \
-                  --startas "$(which bash)" -- \ 
-                  "$PROG" __rollback__ "${TIMEOUT}" "$RESTORE" "$TMPFILE"
+                  --startas "$PROG" -- \
+                  __rollback__ "${TIMEOUT}" "$RESTORE" "$TMPFILE"
 
 [ -x /etc/init.d/fail2ban ] && /etc/init.d/fail2ban stop
 
